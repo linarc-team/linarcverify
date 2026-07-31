@@ -1,7 +1,7 @@
 {
   "name": "discord-verification-site",
   "version": "1.0.0",
-  "description": "Site de verificação do Discord",
+  "description": "Site de verificação da Linarc",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
