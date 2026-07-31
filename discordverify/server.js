@@ -76,9 +76,13 @@ app.use((req, res, next) => {
 });
 
 const router = express.Router();
+const publicDir = path.join(__dirname, 'public');
 
-// Arquivos estáticos sob /verify
-router.use(express.static(path.join(__dirname, 'public')));
+// Página principal e arquivos estáticos
+router.get('/', (req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'));
+});
+router.use(express.static(publicDir));
 
 // Endpoint de teste (não precisa do bot estar pronto)
 router.get('/api/health', (req, res) => {
@@ -328,9 +332,16 @@ router.post('/api/verify-code', async (req, res) => {
 });
 
 // Montar app sob /verify (ou BASE_PATH)
+// Importante: NÃO usar app.get('/verify') para redirect — sem strict routing
+// o Express trata /verify e /verify/ como iguais e cria loop infinito.
 if (BASE_PATH) {
-    app.get(BASE_PATH, (req, res) => {
-        res.redirect(301, `${BASE_PATH}/`);
+    app.use((req, res, next) => {
+        const pathOnly = req.originalUrl.split('?')[0];
+        if (pathOnly === BASE_PATH) {
+            const query = req.originalUrl.slice(pathOnly.length);
+            return res.redirect(301, `${BASE_PATH}/${query}`);
+        }
+        next();
     });
     app.use(BASE_PATH, router);
     app.get('/', (req, res) => {
