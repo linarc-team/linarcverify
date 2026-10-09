@@ -7,7 +7,6 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
 
 // Prefixo da subpasta no repositório/host (ex: https://dominio.com/verify)
 const BASE_PATH = (() => {
@@ -62,8 +61,10 @@ async function sendAuditLog(title, details, color = 0x5865F2) {
 }
 
 function getRequestIp(req) {
-    // req.ip usa o socket por padrão; configure TRUST_PROXY apenas se houver proxy confiável.
-    return req.ip || req.socket?.remoteAddress || 'IP indisponível';
+    // O Worker deve sobrescrever X-Client-IP com o CF-Connecting-IP recebido do visitante.
+    // O cabeçalho CF-Connecting-IP é aceito como fallback quando o Worker o encaminha.
+    const forwardedClientIp = req.get('x-client-ip') || req.get('cf-connecting-ip');
+    return forwardedClientIp || req.ip || req.socket?.remoteAddress || 'IP indisponível';
 }
 
 function logCaptchaFailure(req, reason, userId) {
