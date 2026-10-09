@@ -7,6 +7,7 @@ const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+if (process.env.TRUST_PROXY === 'true') app.set('trust proxy', 1);
 
 // Prefixo da subpasta no repositório/host (ex: https://dominio.com/verify)
 const BASE_PATH = (() => {
@@ -19,11 +20,12 @@ const BASE_PATH = (() => {
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const ROLE_ID = process.env.ROLE_ID;
+const CHANNEL_LOG_ID = process.env.CHANNEL_LOG_ID;
 
 // Validar variáveis de ambiente obrigatórias
-if (!BOT_TOKEN || !GUILD_ID || !ROLE_ID) {
+if (!BOT_TOKEN || !GUILD_ID || !ROLE_ID || !CHANNEL_LOG_ID) {
     console.error('ERRO: Variáveis de ambiente obrigatórias não configuradas!');
-    console.error('Configure: BOT_TOKEN, GUILD_ID, ROLE_ID');
+    console.error('Configure: BOT_TOKEN, GUILD_ID, ROLE_ID, CHANNEL_LOG_ID');
     console.error('Veja o arquivo .env.example para referência.');
     process.exit(1);
 }
@@ -37,6 +39,37 @@ const client = new Client({
         GatewayIntentBits.MessageContent
     ]
 });
+
+// Envia eventos de auditoria ao canal configurado. Falha no log não interrompe a verificação.
+async function sendAuditLog(title, details, color = 0x5865F2) {
+    try {
+        const channel = await client.channels.fetch(CHANNEL_LOG_ID);
+        if (!channel || !channel.isTextBased()) {
+            throw new Error('CHANNEL_LOG_ID não aponta para um canal de texto');
+        }
+        await channel.send({
+            embeds: [{
+                color,
+                title,
+                description: details,
+                timestamp: new Date().toISOString()
+            }],
+            allowedMentions: { parse: [] }
+        });
+    } catch (error) {
+        console.error('Falha ao enviar log ao Discord:', error.message);
+    }
+}
+
+function getRequestIp(req) {
+    // req.ip usa o socket por padrão; configure TRUST_PROXY apenas se houver proxy confiável.
+    return req.ip || req.socket?.remoteAddress || 'IP indisponível';
+}
+
+function logCaptchaFailure(req, reason, userId) {
+    const safeUserId = typeof userId === 'string' && /^\d{17,19}$/.test(userId) ? userId : 'não informado';
+    void sendAuditLog('Falha no CAPTCHA', `IP: \`${getRequestIp(req)}\`\nDiscord ID: \`${safeUserId}\`\nMotivo: ${reason}`, 0xED4245);
+}
 
 // Armazenar códigos de verificação (em produção, use Redis ou banco de dados)
 const verificationCodes = new Map(); // userId -> { code, expiresAt }
@@ -205,6 +238,7 @@ router.post('/api/bot-check', (req, res) => {
 router.post('/api/request-verification', async (req, res) => {
     try {
         const { userId, captchaToken, captchaAnswer, botCheckToken, fingerprint } = req.body;
+        const requestIp = getRequestIp(req);
 
         // Validações de segurança
         if (!userId || !/^\d{17,19}$/.test(userId)) {
@@ -218,21 +252,25 @@ router.post('/api/request-verification', async (req, res) => {
 
         // Validar captcha
         if (!captchaToken || !captchaAnswer) {
+            logCaptchaFailure(req, 'Captcha ausente', userId);
             return res.status(400).json({ error: 'Captcha é obrigatório' });
         }
 
         const captcha = captchaTokens.get(captchaToken);
         if (!captcha || Date.now() > captcha.expiresAt) {
             captchaTokens.delete(captchaToken);
+            logCaptchaFailure(req, 'Captcha expirado ou inválido', userId);
             return res.status(400).json({ error: 'Captcha expirado ou inválido' });
         }
 
         if (Number.parseInt(captchaAnswer, 10) !== captcha.answer) {
             captchaTokens.delete(captchaToken);
+            logCaptchaFailure(req, 'Resposta incorreta', userId);
             return res.status(400).json({ error: 'Resposta do captcha incorreta' });
         }
 
         captchaTokens.delete(captchaToken);
+        void sendAuditLog('Verificação solicitada', `IP: \`${requestIp}\`\nDiscord ID: \`${userId}\``, 0xFEE75C);
 
         // Validar bot check
 
@@ -271,6 +309,7 @@ router.post('/api/request-verification', async (req, res) => {
 router.post('/api/verify-code', async (req, res) => {
     try {
         const { userId, code } = req.body;
+        const requestIp = getRequestIp(req);
 
         if (!userId || !code) {
             return res.status(400).json({ error: 'ID e código são obrigatórios' });
@@ -293,17 +332,20 @@ router.post('/api/verify-code', async (req, res) => {
         // Verificar se existe código para este usuário
         const verification = verificationCodes.get(userId);
         if (!verification) {
+            void sendAuditLog('Tentativa de verificação falhou', `IP: \`${requestIp}\`\nDiscord ID: \`${userId}\`\nMotivo: código não encontrado`, 0xED4245);
             return res.status(400).json({ error: 'Código não encontrado. Solicite um novo código.' });
         }
 
         // Verificar expiração
         if (Date.now() > verification.expiresAt) {
             verificationCodes.delete(userId);
+            void sendAuditLog('Tentativa de verificação falhou', `IP: \`${requestIp}\`\nDiscord ID: \`${userId}\`\nMotivo: código expirado`, 0xED4245);
             return res.status(400).json({ error: 'Código expirado. Solicite um novo código.' });
         }
 
         // Verificar código
         if (verification.code.toUpperCase() !== code.toUpperCase()) {
+            void sendAuditLog('Tentativa de verificação falhou', `IP: \`${requestIp}\`\nDiscord ID: \`${userId}\`\nMotivo: código incorreto`, 0xED4245);
             return res.status(400).json({ error: 'Código incorreto' });
         }
 
@@ -320,9 +362,12 @@ router.post('/api/verify-code', async (req, res) => {
             // Remover código usado
             verificationCodes.delete(userId);
 
+            void sendAuditLog('Verificação concluída', `IP: \`${requestIp}\`\nDiscord ID: \`${userId}\``, 0x57F287);
+
             res.json({ success: true, message: 'Verificação concluída com sucesso!' });
         } catch (error) {
             console.error('Erro ao adicionar cargo:', error);
+            void sendAuditLog('Erro ao concluir verificação', `IP: \`${requestIp}\`\nDiscord ID: \`${userId}\`\nMotivo: falha ao adicionar cargo`, 0xED4245);
             res.status(500).json({ error: 'Erro ao adicionar cargo. Tente novamente.' });
         }
     } catch (error) {
